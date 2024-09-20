@@ -283,6 +283,7 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
             $composer = [
                 ...$decoded,
                 'name' => 'mpl/matomo',
+                'type' => 'mpl-matomo',
                 '_comment' => [
                     ...($decoded['_comment'] ?? []),
                     'Composer based build by PortlandLabs',
