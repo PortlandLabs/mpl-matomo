@@ -1,0 +1,324 @@
+#!/usr/bin/env php
+<?php
+
+use Composer\Semver\Semver;
+use Composer\Semver\VersionParser;
+use Github\AuthMethod;
+use Github\Client;
+use Github\ResultPager;
+use GuzzleHttp\Client as GuzzleClient;
+use Psr\Http\Client\ClientExceptionInterface;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestInterface;
+use Silly\Application;
+use Symfony\Component\Console\Helper\ProgressBar;
+use Symfony\Component\Process\Process;
+
+require_once __DIR__ . '/vendor/autoload.php';
+
+if (file_exists(__DIR__ . '/.env')) {
+    (new \Symfony\Component\Dotenv\Dotenv())->load(__DIR__ . '/.env');
+    var_dump();
+}
+
+const TEMP_DIR = __DIR__ . '/temp';
+const BUILD_DIR = __DIR__ . '/build';
+const OVERLAY_DIR = __DIR__ . '/overlay';
+const KEYRING_FILE = __DIR__ . '/.gpgkeyring';
+const MATOMO_KEYS = [
+    'F529A27008477483777FC23D63BB30D0E5D2C749',
+    '814E346FA01A20DBB04B6807B5DBD5925590A237',
+];
+
+function http(): Psr\Http\Client\ClientInterface
+{
+    static $http = new GuzzleClient();
+    return $http;
+}
+
+function request(string $method, \Psr\Http\Message\UriInterface|string $uri): RequestInterface
+{
+    static $factory = new \Http\Factory\Guzzle\RequestFactory();
+    return $factory->createRequest($method, $uri)->withAddedHeader('x-matomo-release-repository', '1')->withAddedHeader('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
+}
+
+function stream(): \Psr\Http\Message\StreamFactoryInterface
+{
+    static $stream = new \Http\Factory\Guzzle\StreamFactory();
+    return $stream;
+}
+
+function fs(): \Symfony\Component\Filesystem\Filesystem
+{
+    static $filesystem = new \Symfony\Component\Filesystem\Filesystem();
+    return $filesystem;
+}
+
+function github(): Client
+{
+    static $client = Client::createWithHttpClient(http());
+    $token = $_ENV['GITHUB_TOKEN'] ?? null;
+    if ($token) {
+        $client->authenticate($token, authMethod: AuthMethod::ACCESS_TOKEN);
+    }
+    return $client;
+}
+
+function tag_exists(string $directory, string $tag): bool
+{
+    $process = new Process(['git', 'tag', '-l', $tag], $directory);
+    $process->run();
+    return trim($process->getOutput()) === $tag;
+}
+
+function create_tag(string $unzipDir, string $tag): void
+{
+    (new Process(['git', 'config', 'user.email', 'mpl-matomo@portlandlabs.com'], BUILD_DIR))->mustRun();
+    (new Process(['git', 'config', 'user.name', 'PortlandLabs Matomo Builder'], BUILD_DIR))->mustRun();
+    (new Process(['git', 'checkout', '--orphan', $tag], BUILD_DIR))->mustRun();
+    (new Process(['git', 'reset', '.', $tag], BUILD_DIR))->mustRun();
+    (new Process(['git', 'clean', '-fd', $tag], BUILD_DIR))->mustRun();
+    fs()->mirror($unzipDir, BUILD_DIR);
+    (new Process(['git', 'add', '--all'], BUILD_DIR))->mustRun();
+    (new Process(['git', 'commit', '-m', "Release {$tag}"], BUILD_DIR))->mustRun();
+    (new Process(['git', 'tag', $tag], BUILD_DIR))->mustRun();
+}
+
+function valid_signature(string $asc, string $file): bool
+{
+    $key = signing_key($asc, $file);
+    return $key !== null && in_array(strtoupper($key), MATOMO_KEYS, true);
+}
+
+function signing_key(string $asc, string $file): ?string
+{
+    $process = new Symfony\Component\Process\Process([
+        'gpg',
+        '--no-default-keyring',
+        '--keyring',
+        KEYRING_FILE,
+        '--verify',
+        realpath($asc),
+        realpath($file),
+    ]);
+    $process->mustRun();
+
+    $output = $process->getOutput() . $process->getErrorOutput();
+
+    if (!str_contains($output, 'gpg: Good signature from ')) {
+        return null;
+    }
+
+    if (!preg_match('/Primary key fingerprint: ([a-fA-F0-9 ]+)/', $output, $matches)) {
+        return null;
+    }
+
+    return str_replace(' ', '', $matches[1]);
+}
+
+function download(RequestInterface $request, string $sink, int $chunkSize = 1024000, ?callable $validate = null, ProgressBar $progress = null, ?ClientInterface $client = null): void
+{
+    $client ??= http();
+    try {
+        $response = $client->sendRequest($request);
+    } catch (ClientExceptionInterface $e) {
+        throw new \RuntimeException('Unable to send request.');
+    }
+
+    // Validate the status code
+    $statusCode = (string) $response->getStatusCode();
+    match ((int) $statusCode[0]) {
+        4, 5 => throw new \RuntimeException($response->getReasonPhrase(), $statusCode),
+        2 => null,
+        default => throw new RuntimeException("Unexpected response code {$statusCode}: {$response->getReasonPhrase()}", $statusCode),
+    };
+
+    if ($validate !== null && !$validate($response)) {
+        throw new \RuntimeException("Response didn't pass validation.");
+    }
+
+    // Determine the total length
+    $body = $response->getBody();
+    $length = (int) (($response->getHeader('Content-Length')[0] ?? null) ?: ($body->getSize() ?? null));
+    $output = stream()->createStreamFromFile($sink, 'w+');
+
+    if ($progress) {
+        $progress->setMaxSteps($length);
+        $progress->setMessage(basename($sink));
+    }
+
+    while (!$body->eof() && $chunk = $body->read($chunkSize)) {
+        $output->write($chunk);
+        if ($progress) {
+            $progress->advance(strlen($chunk));
+        }
+    }
+
+    if ($progress) {
+        $progress->clear();
+        $progress->finish();
+    }
+}
+
+function unzip(string $zip, string $to)
+{
+    (new Process([
+        'unzip',
+        $zip,
+        '-d',
+        $to,
+    ]))->mustRun();
+}
+
+$app = new Application();
+
+$app->command('build', function (\Symfony\Component\Console\Input\InputInterface $input, \Symfony\Component\Console\Output\OutputInterface $output) {
+    $io = new \Symfony\Component\Console\Style\SymfonyStyle($input, $output);
+    fs()->remove(TEMP_DIR);
+    fs()->mkdir(TEMP_DIR);
+
+    $versions = (new ResultPager(github(), 100))->fetchAllLazy(github()->repo()->releases(), 'all', [
+        'matomo-org', 'matomo',
+    ]);
+
+    $versionParser = new VersionParser();
+    $tags = [];
+    foreach ($versions as $release) {
+        try {
+            $version = $release['name'];
+            $normalVersion = $versionParser->normalize($release['name']);
+
+            if ($versionParser::parseStability($normalVersion) === 'stable') {
+                $tags[$normalVersion] = $version;
+            }
+        } catch (UnexpectedValueException $e) {
+            // Ignore
+        }
+    }
+
+    $sorted = array_map(fn($k) => $tags[$k], Semver::sort(array_keys($tags)));
+    foreach ($sorted as $tag) {
+        $io->writeln("<info>Processing {$tag}</>");
+        if (tag_exists(BUILD_DIR, $tag)) {
+            continue;
+        }
+
+        // Download and unzip the release from matomo
+        $progress = $io->createProgressBar();
+        $progress->display();
+
+        $type = Semver::satisfies($tag, '>=3.5') ? 'matomo' : 'piwik';
+        $baseDir = TEMP_DIR . "/{$tag}";
+        $name = "{$type}-{$tag}.zip";
+        $file = "{$baseDir}/zip.zip";
+        $asc = "{$file}.asc";
+        $unzip = "{$baseDir}/unzip";
+        $composerJson = "{$baseDir}/composer.json";
+
+        fs()->mkdir([$baseDir, $unzip]);
+        fs()->touch([$file, $asc, $composerJson]);
+        fs()->dumpFile($composerJson, '{}');
+
+        // Download the composer.json and zip release
+        try {
+            download(request('GET', "https://raw.githubusercontent.com/matomo-org/matomo/refs/tags/{$tag}/composer.json"), $composerJson, progress: $io->createProgressBar());
+        } catch (\RuntimeException $e) {
+            $io->writeln("  <error>Unable to download composer.json: {$e->getMessage()}</error>");
+            continue;
+        }
+
+        $io->newLine();
+
+        try {
+            download(request('GET', "https://builds.matomo.org/{$name}"), $file, progress: $io->createProgressBar());
+        } catch (\RuntimeException $e) {
+            $io->writeln("  <error>Unable to download matomo: {$e->getMessage()}</error>");
+            continue;
+        }
+
+        $io->newLine();
+
+        if (Semver::satisfies($tag, '>=2.9')) {
+            $io->writeln('  Verifying signature...');
+
+            try {
+                download(request('GET', "https://builds.matomo.org/{$name}.asc"), $asc);
+            } catch (\RuntimeException $e) {
+                $io->writeln("  <error>Unable to download signature: {$e->getMessage()}</error>");
+                continue;
+            }
+
+            if (!valid_signature($asc, $file)) {
+                $io->writeln("  <error>Invalid signature</error>");
+                continue;
+            }
+        }
+
+        // Unzip
+        try {
+            $io->writeln('  Unzipping...');
+            unzip($file, $unzip);
+        } catch (\Symfony\Component\Process\Exception\ProcessFailedException $e) {
+            $io->writeln('  <error>Unable to unzip</error>');
+            continue;
+        }
+
+        // Normalize
+        $io->writeln('  Normalizing...');
+        try {
+            $matomo = $unzip . '/matomo';
+            if (fs()->exists($unzip . '/piwik')) {
+                fs()->rename($unzip . '/piwik', $matomo);
+            }
+            fs()->remove([$matomo . '/vendor', $matomo . '/composer.lock']);
+
+            // Update readme
+            fs()->dumpFile($matomo . '/README.md', implode("\n\n------\n\n", [
+                fs()->readFile(OVERLAY_DIR . '/README.md'),
+                fs()->readFile($matomo . '/README.md'),
+            ]));
+
+            // Update composer.json
+            $decoded = json_decode(fs()->readFile($composerJson), true, 512, JSON_THROW_ON_ERROR);
+            $composer = [
+                ...$decoded,
+                'name' => 'mpl/matomo',
+                '_comment' => [
+                    ...($decoded['_comment'] ?? []),
+                    'Composer based build by PortlandLabs',
+                ],
+            ];
+            fs()->dumpFile($matomo . '/composer.json', json_encode($composer, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
+        } catch (\Throwable $e) {
+            $io->writeln('  <error>Unable to normalize</error>');
+            continue;
+        }
+
+        exit;
+        // Build new tag
+        $io->writeln('  Tagging...');
+        try {
+            create_tag($unzip . '/matomo', $tag);
+        } catch (\Throwable $e) {
+            $io->writeln('  <error>Unable to create tag</error>');
+            continue;
+        }
+    }
+    exit;
+});
+
+$app->command('keys', function () {
+    (new Process([
+        'gpg',
+        '--no-default-keyring',
+        '--keyring',
+        KEYRING_FILE,
+        '--keyserver',
+        'hkps://keyserver.ubuntu.com',
+        '--recv-keys',
+        ...MATOMO_KEYS,
+    ]))->mustRun();
+});
+
+
+$app->run();

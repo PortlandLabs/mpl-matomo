@@ -1,0 +1,5 @@
+/temp/
+/build/
+/vendor/
+/.idea
+/.env

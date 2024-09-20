@@ -1,0 +1,37 @@
+name: Update tags
+
+on: [workflow_dispatch]
+env:
+  GITHUB_TOKEN: ${{ secrets.TOKEN }}
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        php: [8.3]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Checkout again for build dir
+        uses: actions/checkout@v4
+        with:
+          path: build
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: json, curl
+          coverage: none
+
+      - name: Run build
+        run: ./console build
+
+      - name: Push up branches
+        run: git push --all
+        working-directory: build
+
+      - name: Push up tags
+        run: git push --all
+        working-directory: build
