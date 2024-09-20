@@ -35,5 +35,5 @@ jobs:
         working-directory: build
 
       - name: Push up tags
-        run: git push --all
+        run: git push --tags
         working-directory: build
