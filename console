@@ -294,7 +294,6 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
             continue;
         }
 
-        exit;
         // Build new tag
         $io->writeln('  Tagging...');
         try {
@@ -304,7 +303,8 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
             continue;
         }
     }
-    exit;
+
+    return 0;
 });
 
 $app->command('keys', function () {
@@ -318,6 +318,8 @@ $app->command('keys', function () {
         '--recv-keys',
         ...MATOMO_KEYS,
     ]))->mustRun();
+
+    return 0;
 });
 
 
