@@ -284,6 +284,10 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
                 ...$decoded,
                 'name' => 'mpl/matomo',
                 'type' => 'mpl-matomo',
+                'replace' => [
+                    ...($decoded['replace'] ?? []),
+                    'matomo/matomo' => 'self.version'
+                ],
                 '_comment' => [
                     ...($decoded['_comment'] ?? []),
                     'Composer based build by PortlandLabs',
