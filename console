@@ -12,13 +12,14 @@ use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
 use Silly\Application;
 use Symfony\Component\Console\Helper\ProgressBar;
+use Symfony\Component\Console\Style\SymfonyStyle;
+use Symfony\Component\Finder\Finder;
 use Symfony\Component\Process\Process;
 
 require_once __DIR__ . '/vendor/autoload.php';
 
 if (file_exists(__DIR__ . '/.env')) {
     (new \Symfony\Component\Dotenv\Dotenv())->load(__DIR__ . '/.env');
-    var_dump();
 }
 
 const TEMP_DIR = __DIR__ . '/temp';
@@ -78,6 +79,7 @@ function create_tag(string $unzipDir, string $tag): void
     (new Process(['git', 'checkout', '--orphan', $tag], BUILD_DIR))->mustRun();
     (new Process(['git', 'reset', '.', $tag], BUILD_DIR))->mustRun();
     (new Process(['git', 'clean', '-fd', $tag], BUILD_DIR))->mustRun();
+    fs()->remove(Finder::create()->in(BUILD_DIR)->exclude('.git')->ignoreDotFiles(false)->depth(0));
     fs()->mirror($unzipDir, BUILD_DIR);
     (new Process(['git', 'add', '--all'], BUILD_DIR))->mustRun();
     (new Process(['git', 'commit', '-m', "Release {$tag}"], BUILD_DIR))->mustRun();
@@ -116,8 +118,9 @@ function signing_key(string $asc, string $file): ?string
     return str_replace(' ', '', $matches[1]);
 }
 
-function download(RequestInterface $request, string $sink, int $chunkSize = 1024000, ?callable $validate = null, ProgressBar $progress = null, ?ClientInterface $client = null): void
+function download(RequestInterface $request, string $sink, int $chunkSize = 1024000, ?callable $validate = null, ?SymfonyStyle $io = null, ?ClientInterface $client = null): void
 {
+    $io?->writeln('  Downloading ' . basename($sink) . '...');
     $client ??= http();
     try {
         $response = $client->sendRequest($request);
@@ -139,24 +142,10 @@ function download(RequestInterface $request, string $sink, int $chunkSize = 1024
 
     // Determine the total length
     $body = $response->getBody();
-    $length = (int) (($response->getHeader('Content-Length')[0] ?? null) ?: ($body->getSize() ?? null));
     $output = stream()->createStreamFromFile($sink, 'w+');
-
-    if ($progress) {
-        $progress->setMaxSteps($length);
-        $progress->setMessage(basename($sink));
-    }
 
     while (!$body->eof() && $chunk = $body->read($chunkSize)) {
         $output->write($chunk);
-        if ($progress) {
-            $progress->advance(strlen($chunk));
-        }
-    }
-
-    if ($progress) {
-        $progress->clear();
-        $progress->finish();
     }
 }
 
@@ -200,17 +189,15 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
     foreach ($sorted as $tag) {
         $io->writeln("<info>Processing {$tag}</>");
         if (tag_exists(BUILD_DIR, $tag)) {
+            $io->writeln('  <comment>Tag exists.</comment>');
             continue;
         }
 
         // Download and unzip the release from matomo
-        $progress = $io->createProgressBar();
-        $progress->display();
-
         $type = Semver::satisfies($tag, '>=3.5') ? 'matomo' : 'piwik';
         $baseDir = TEMP_DIR . "/{$tag}";
         $name = "{$type}-{$tag}.zip";
-        $file = "{$baseDir}/zip.zip";
+        $file = "{$baseDir}/matomo.zip";
         $asc = "{$file}.asc";
         $unzip = "{$baseDir}/unzip";
         $composerJson = "{$baseDir}/composer.json";
@@ -221,28 +208,22 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
 
         // Download the composer.json and zip release
         try {
-            download(request('GET', "https://raw.githubusercontent.com/matomo-org/matomo/refs/tags/{$tag}/composer.json"), $composerJson, progress: $io->createProgressBar());
+            download(request('GET', "https://raw.githubusercontent.com/matomo-org/matomo/refs/tags/{$tag}/composer.json"), $composerJson, io: $io);
         } catch (\RuntimeException $e) {
             $io->writeln("  <error>Unable to download composer.json: {$e->getMessage()}</error>");
             continue;
         }
 
-        $io->newLine();
-
         try {
-            download(request('GET', "https://builds.matomo.org/{$name}"), $file, progress: $io->createProgressBar());
+            download(request('GET', "https://builds.matomo.org/{$name}"), $file, io: $io);
         } catch (\RuntimeException $e) {
             $io->writeln("  <error>Unable to download matomo: {$e->getMessage()}</error>");
             continue;
         }
 
-        $io->newLine();
-
         if (Semver::satisfies($tag, '>=2.9')) {
-            $io->writeln('  Verifying signature...');
-
             try {
-                download(request('GET', "https://builds.matomo.org/{$name}.asc"), $asc);
+                download(request('GET', "https://builds.matomo.org/{$name}.asc"), $asc, io: $io);
             } catch (\RuntimeException $e) {
                 $io->writeln("  <error>Unable to download signature: {$e->getMessage()}</error>");
                 continue;
