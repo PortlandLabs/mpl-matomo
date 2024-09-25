@@ -1,0 +1,24 @@
+{
+    "Live": {
+        "ConvertedNGoals": "Konverterte %s mål",
+        "FirstVisit": "Første besøk",
+        "GoalType": "Type",
+        "HideMap": "skjul kart",
+        "LastHours": "Siste %s timer",
+        "LastMinutes": "Siste %s minutter",
+        "LinkVisitorLog": "Vis detaljert logg over besøkende",
+        "NbVisitor": "1 besøkende",
+        "NbVisitors": "%s besøkende",
+        "NextVisitor": "Neste besøkende",
+        "RealTimeVisitorCount": "Besøkstall i sanntid",
+        "Referrer_URL": "Henvisnings-URL",
+        "ShowMap": "vis kart",
+        "SimpleRealTimeWidget_Message": "%s og %s i de siste %s",
+        "ViewVisitorProfile": "Vis besøksprofil",
+        "VisitedPages": "Besøkte sider",
+        "VisitorLog": "Logg over besøkende",
+        "VisitorProfile": "Besøksprofil",
+        "VisitorsInRealTime": "Besøkende i sanntid",
+        "VisitsFrom": "%1$s%2$s besøk%3$s fra"
+    }
+}
