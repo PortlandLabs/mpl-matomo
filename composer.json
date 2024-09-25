@@ -15,7 +15,8 @@
         "symfony/filesystem": "^7.1",
         "psr/simple-cache": "^3.0",
         "symfony/dotenv": "^7.1",
-        "symfony/finder": "^7.1"
+        "symfony/finder": "^7.1",
+        "nikic/php-parser": "^5.2"
     },
     "config": {
         "allow-plugins": {

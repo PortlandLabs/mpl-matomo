@@ -7,6 +7,9 @@ use Github\AuthMethod;
 use Github\Client;
 use Github\ResultPager;
 use GuzzleHttp\Client as GuzzleClient;
+use PhpParser\Node;
+use PhpParser\NodeTraverser;
+use PhpParser\NodeVisitorAbstract;
 use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
@@ -158,10 +161,73 @@ function unzip(string $zip, string $to)
     ]))->mustRun();
 }
 
+function parse_manifest(string $file): array
+{
+    $parser = (new \PhpParser\ParserFactory())->createForNewestSupportedVersion();
+    try {
+        $ast = $parser->parse(file_get_contents($file));
+    } catch (Error $error) {
+        throw new \RuntimeException('Unable to parse manifest file.');
+    }
+
+    $manifest = [];
+
+    assert($ast[0] instanceof \PhpParser\Node\Stmt\Namespace_);
+    $class = $ast[0]->stmts[0];
+    assert($class instanceof \PhpParser\Node\Stmt\Class_);
+    $files = $class->getProperty('files')->props[0]->default;
+    assert($files instanceof \PhpParser\Node\Expr\Array_);
+
+    foreach ($files->items as $arrayItem) {
+        assert($arrayItem->key instanceof \PhpParser\Node\Scalar\String_);
+        $key = $arrayItem->key->value;
+        $data = [];
+
+        assert($arrayItem->value instanceof \PhpParser\Node\Expr\Array_);
+        foreach ($arrayItem->value->items as $arrayItemValueItem) {
+            assert($arrayItemValueItem->value instanceof \PhpParser\Node\Scalar\String_);
+            $data[] = $arrayItemValueItem->value->value;
+        }
+
+        $manifest[$key] = $data;
+    }
+
+    return $manifest;
+}
+
+function build_manifest(array $manifest, bool $shortArrays): string
+{
+    $parser = (new \PhpParser\ParserFactory())->createForNewestSupportedVersion();
+    try {
+        $ast = $parser->parse(file_get_contents(__DIR__ . '/overlay/manifest.inc.php'));
+        $tokens = $parser->getTokens();
+    } catch (Error $error) {
+        throw new \RuntimeException('Unable to parse manifest template.');
+    }
+
+    $manifestNodes = (new \PhpParser\BuilderFactory())->val($manifest);
+
+    $traverser = new NodeTraverser();
+    $traverser->addVisitor(new class ($manifestNodes) extends NodeVisitorAbstract {
+        public function __construct(public $manifest) {}
+
+        public function enterNode(Node $node)
+        {
+            if (!$node instanceof Node\PropertyItem) {
+                return;
+            }
+
+            $node->default = $this->manifest;
+        }
+    });
+
+    $printer = (new \PortlandLabs\Mpl\Printer(['shortArraySyntax' => $shortArrays]));
+    return $printer->printFormatPreserving($traverser->traverse($ast), $ast, $tokens);
+}
+
 $app = new Application();
 
-$app->command('build', function (\Symfony\Component\Console\Input\InputInterface $input, \Symfony\Component\Console\Output\OutputInterface $output) {
-    $io = new \Symfony\Component\Console\Style\SymfonyStyle($input, $output);
+$app->command('build [constraint]', function (SymfonyStyle $io, ?string $constraint) {
     fs()->remove(TEMP_DIR);
     fs()->mkdir(TEMP_DIR);
 
@@ -175,6 +241,10 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
         try {
             $version = $release['name'];
             $normalVersion = $versionParser->normalize($release['name']);
+
+            if ($constraint !== null && !Semver::satisfies($normalVersion, $constraint)) {
+                continue;
+            }
 
             if ($versionParser::parseStability($normalVersion) === 'stable') {
                 $tags[$normalVersion] = $version;
@@ -279,10 +349,28 @@ $app->command('build', function (\Symfony\Component\Console\Input\InputInterface
             continue;
         }
 
+        // Update manifest
+        $removeFiles = fn($file) => (str_starts_with($file, 'vendor/') || $file === 'composer.lock');
+        $rehashFiles = ['composer.json', 'README.md'];
+        $manifest = parse_manifest($matomo . '/config/manifest.inc.php');
+        foreach (array_keys($manifest) as $key) {
+            if ($removeFiles($key)) {
+                unset($manifest[$key]);
+            }
+        }
+
+        foreach ($rehashFiles as $key) {
+            $manifest[$key] = [
+                (string) filesize($matomo . '/' . $key),
+                (string) md5_file($matomo . '/' . $key),
+            ];
+        }
+        fs()->dumpFile($matomo . '/config/manifest.inc.php', build_manifest($manifest, false));
+
         // Build new tag
         $io->writeln('  Tagging...');
         try {
-            create_tag($unzip . '/matomo', $tag);
+            create_tag($matomo, $tag);
         } catch (\Throwable $e) {
             $io->writeln('  <error>Unable to create tag</error>');
             continue;
