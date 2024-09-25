@@ -173,9 +173,9 @@ function parse_manifest(string $file): array
     $manifest = [];
 
     assert($ast[0] instanceof \PhpParser\Node\Stmt\Namespace_);
-    $class = $ast[0]->stmts[0];
+    $class = $ast[0]->stmts[0] ?? null;
     assert($class instanceof \PhpParser\Node\Stmt\Class_);
-    $files = $class->getProperty('files')->props[0]->default;
+    $files = $class->getProperty('files')->props[0]->default ?? null;
     assert($files instanceof \PhpParser\Node\Expr\Array_);
 
     foreach ($files->items as $arrayItem) {
@@ -352,7 +352,12 @@ $app->command('build [constraint]', function (SymfonyStyle $io, ?string $constra
         // Update manifest
         $removeFiles = fn($file) => (str_starts_with($file, 'vendor/') || $file === 'composer.lock');
         $rehashFiles = ['composer.json', 'README.md'];
-        $manifest = parse_manifest($matomo . '/config/manifest.inc.php');
+        try {
+            $manifest = parse_manifest($matomo . '/config/manifest.inc.php');
+        } catch (\Throwable $e) {
+            $io->writeln('  <error>Unable to parse manifest</error>');
+            continue;
+        }
         foreach (array_keys($manifest) as $key) {
             if ($removeFiles($key)) {
                 unset($manifest[$key]);
@@ -365,7 +370,13 @@ $app->command('build [constraint]', function (SymfonyStyle $io, ?string $constra
                 (string) md5_file($matomo . '/' . $key),
             ];
         }
-        fs()->dumpFile($matomo . '/config/manifest.inc.php', build_manifest($manifest, false));
+
+        try {
+            fs()->dumpFile($matomo . '/config/manifest.inc.php', build_manifest($manifest, false));
+        } catch (\Throwable $e) {
+            $io->writeln('  <error>Unable to write manifest</error>');
+            continue;
+        }
 
         // Build new tag
         $io->writeln('  Tagging...');
