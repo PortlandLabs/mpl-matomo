@@ -234,7 +234,6 @@ $app->command('build [constraint]', function (SymfonyStyle $io, ?string $constra
     $versions = (new ResultPager(github(), 100))->fetchAllLazy(github()->repo()->releases(), 'all', [
         'matomo-org', 'matomo',
     ]);
-
     $versionParser = new VersionParser();
     $tags = [];
     foreach ($versions as $release) {
@@ -254,11 +253,22 @@ $app->command('build [constraint]', function (SymfonyStyle $io, ?string $constra
         }
     }
 
+    $skip = [
+        '2.2.1' => 'Invalid config/manifest.inc.php file in release',
+        '2.18.1' => 'Release zip doesn\'t exist',
+        '3.8.1' => 'Invalid composer.json https://github.com/matomo-org/matomo/blob/3.8.1/composer.json#L31C10-L31C17',
+    ];
+
     $sorted = array_map(fn($k) => $tags[$k], Semver::sort(array_keys($tags)));
     foreach ($sorted as $tag) {
         $io->writeln("<info>Processing {$tag}</>");
         if (tag_exists(BUILD_DIR, $tag)) {
             $io->writeln('  <comment>Tag exists.</comment>');
+            continue;
+        }
+
+        if (isset($skip[$tag])) {
+            $io->writeln("  <comment>Skipping: {$skip[$tag]}</comment>");
             continue;
         }
 
