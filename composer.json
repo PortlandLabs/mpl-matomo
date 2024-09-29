@@ -2,6 +2,7 @@
     "_comment": [
         "The main branch is used to build the project, see other branches and tags for releases."
     ],
+    "name": "mpl/matomo",
     "autoload": {
         "psr-4": {
             "PortlandLabs\\Mpl\\": "src/"
