@@ -1,9 +1,9 @@
 name: Update tags
 
-on: 
+on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "0 */6 * * *"
 env:
   GITHUB_TOKEN: ${{ secrets.TOKEN }}
 jobs:
